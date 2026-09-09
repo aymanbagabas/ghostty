@@ -124,6 +124,39 @@ test "tracked_grid_ref snapshots after terminal scroll" {
     try testing.expectEqual(@as(u32, 'A'), buf[0]);
 }
 
+test "tracked_grid_ref snapshots hyperlink id after terminal scroll" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        5,
+        2,
+    ));
+    defer terminal_c.free(terminal);
+
+    const seq = "\x1b]8;id=foo;https://example.com\x1b\\A\x1b]8;;\x1b\\";
+    terminal_c.vt_write(terminal, seq, seq.len);
+
+    var ref: CTrackedGridRef = null;
+    try testing.expectEqual(Result.success, terminal_c.grid_ref_track(
+        terminal,
+        point.Point.cval(.{ .active = .{ .x = 0, .y = 0 } }),
+        &ref,
+    ));
+    defer tracked_grid_ref_free(ref);
+
+    terminal_c.vt_write(terminal, "\r\nB\r\nC", 6);
+    try testing.expect(tracked_grid_ref_has_value(ref));
+
+    var snapshot: grid_ref_c.CGridRef = undefined;
+    try testing.expectEqual(Result.success, tracked_grid_ref_snapshot(ref, &snapshot));
+
+    var buf: [256]u8 = undefined;
+    var len: usize = undefined;
+    try testing.expectEqual(Result.success, grid_ref_c.grid_ref_hyperlink_id(&snapshot, &buf, buf.len, &len));
+    try testing.expectEqualStrings("foo", buf[0..len]);
+}
+
 test "tracked_grid_ref reports no value after reset" {
     var terminal: terminal_c.Terminal = null;
     try testing.expectEqual(Result.success, terminal_c.new(

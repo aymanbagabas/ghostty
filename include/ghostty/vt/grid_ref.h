@@ -191,6 +191,45 @@ GHOSTTY_API GhosttyResult ghostty_grid_ref_hyperlink_uri(
     size_t *out_len);
 
 /**
+ * Get the hyperlink ID for the cell at the grid reference's position.
+ *
+ * The ID is the `id=` parameter of the `OSC 8` sequence that opened the
+ * link. It identifies one logical link across separate runs of cells, so
+ * two cells with the same ID and the same URI belong to the same link.
+ *
+ * A link that carries no `id=` gets an implicit ID instead. The implicit
+ * ID is a screen-local counter, so it is not stable across terminals and
+ * is not exposed. Such a link reports GHOSTTY_NO_VALUE.
+ *
+ * The outcomes are:
+ *
+ * - explicit ID: GHOSTTY_SUCCESS, the ID bytes are written
+ * - implicit ID: GHOSTTY_NO_VALUE, out_len is set to 0
+ * - no hyperlink: GHOSTTY_SUCCESS, out_len is set to 0
+ *
+ * If the buffer is too small (or NULL), the function returns
+ * GHOSTTY_OUT_OF_SPACE and writes the required number of bytes to
+ * out_len. The caller can then retry with a sufficiently sized buffer.
+ *
+ * @param ref Pointer to the grid reference
+ * @param buf Output buffer for the ID bytes (may be NULL)
+ * @param buf_len Size of the output buffer in bytes
+ * @param[out] out_len On success, the number of bytes written. On
+ *             GHOSTTY_OUT_OF_SPACE, the required buffer size in bytes.
+ *             On GHOSTTY_NO_VALUE, 0.
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_NO_VALUE if the hyperlink
+ *         has an implicit ID, GHOSTTY_INVALID_VALUE if the ref's node is
+ *         NULL, GHOSTTY_OUT_OF_SPACE if the buffer is too small
+ *
+ * @ingroup grid_ref
+ */
+GHOSTTY_API GhosttyResult ghostty_grid_ref_hyperlink_id(
+    const GhosttyGridRef *ref,
+    uint8_t *buf,
+    size_t buf_len,
+    size_t *out_len);
+
+/**
  * Get the style of the cell at the grid reference's position.
  *
  * @param ref Pointer to the grid reference

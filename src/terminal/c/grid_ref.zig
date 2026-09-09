@@ -127,6 +127,51 @@ pub fn grid_ref_hyperlink_uri(
     return .success;
 }
 
+pub fn grid_ref_hyperlink_id(
+    ref: *const CGridRef,
+    out_buf: ?[*]u8,
+    buf_len: usize,
+    out_len: *usize,
+) callconv(lib.calling_conv) Result {
+    const p = ref.toPin() orelse return .invalid_value;
+    const terminal_page = p.node.page();
+    const rac = terminal_page.getRowAndCell(p.x, p.y);
+    const cell = rac.cell;
+
+    if (!cell.hyperlink) {
+        out_len.* = 0;
+        return .success;
+    }
+
+    const link_id = terminal_page.lookupHyperlink(cell) orelse {
+        out_len.* = 0;
+        return .success;
+    };
+    const entry = terminal_page.hyperlink_set.get(
+        terminal_page.memory,
+        link_id,
+    );
+
+    // An implicit ID is a screen-local counter that we don't expose, so
+    // callers only learn that this link has no author-provided identity.
+    const id = switch (entry.id) {
+        .implicit => {
+            out_len.* = 0;
+            return .no_value;
+        },
+        .explicit => |slice| slice.slice(terminal_page.memory),
+    };
+
+    if (out_buf == null or buf_len < id.len) {
+        out_len.* = id.len;
+        return .out_of_space;
+    }
+
+    @memcpy(out_buf.?[0..id.len], id);
+    out_len.* = id.len;
+    return .success;
+}
+
 pub fn grid_ref_style(
     ref: *const CGridRef,
     out: ?*style_c.Style,
@@ -254,4 +299,153 @@ test "grid_ref_hyperlink_uri with hyperlink" {
     var buf: [256]u8 = undefined;
     try testing.expectEqual(Result.success, grid_ref_hyperlink_uri(&ref, &buf, buf.len, &len));
     try testing.expectEqualStrings("https://example.com", buf[0..len]);
+}
+
+test "grid_ref_hyperlink_id null node" {
+    const ref = CGridRef{};
+    var len: usize = undefined;
+    try testing.expectEqual(Result.invalid_value, grid_ref_hyperlink_id(&ref, null, 0, &len));
+}
+
+test "grid_ref_hyperlink_id no hyperlink" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        80,
+        24,
+    ));
+    defer terminal_c.free(terminal);
+
+    terminal_c.vt_write(terminal, "hello", 5);
+
+    var ref: CGridRef = undefined;
+    try testing.expectEqual(Result.success, terminal_c.grid_ref(
+        terminal,
+        point.Point.cval(.{ .active = .{ .x = 0, .y = 0 } }),
+        &ref,
+    ));
+
+    var len: usize = 12345;
+    try testing.expectEqual(Result.success, grid_ref_hyperlink_id(&ref, null, 0, &len));
+    try testing.expectEqual(@as(usize, 0), len);
+}
+
+test "grid_ref_hyperlink_id explicit" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        80,
+        24,
+    ));
+    defer terminal_c.free(terminal);
+
+    // Write OSC 8 hyperlink with an explicit id
+    const seq = "\x1b]8;id=foo;https://example.com\x1b\\link\x1b]8;;\x1b\\";
+    terminal_c.vt_write(terminal, seq, seq.len);
+
+    var ref: CGridRef = undefined;
+    try testing.expectEqual(Result.success, terminal_c.grid_ref(
+        terminal,
+        point.Point.cval(.{ .active = .{ .x = 0, .y = 0 } }),
+        &ref,
+    ));
+
+    // First query length with null buf
+    var len: usize = undefined;
+    try testing.expectEqual(Result.out_of_space, grid_ref_hyperlink_id(&ref, null, 0, &len));
+    try testing.expectEqual(@as(usize, 3), len); // "foo"
+
+    // Now read with a properly sized buffer
+    var buf: [256]u8 = undefined;
+    try testing.expectEqual(Result.success, grid_ref_hyperlink_id(&ref, &buf, buf.len, &len));
+    try testing.expectEqualStrings("foo", buf[0..len]);
+
+    // The URI is still readable
+    try testing.expectEqual(Result.success, grid_ref_hyperlink_uri(&ref, &buf, buf.len, &len));
+    try testing.expectEqualStrings("https://example.com", buf[0..len]);
+}
+
+test "grid_ref_hyperlink_id implicit" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        80,
+        24,
+    ));
+    defer terminal_c.free(terminal);
+
+    // Write OSC 8 hyperlink with no id, which gets an implicit id
+    const seq = "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\";
+    terminal_c.vt_write(terminal, seq, seq.len);
+
+    var ref: CGridRef = undefined;
+    try testing.expectEqual(Result.success, terminal_c.grid_ref(
+        terminal,
+        point.Point.cval(.{ .active = .{ .x = 0, .y = 0 } }),
+        &ref,
+    ));
+
+    var len: usize = 12345;
+    try testing.expectEqual(Result.no_value, grid_ref_hyperlink_id(&ref, null, 0, &len));
+    try testing.expectEqual(@as(usize, 0), len);
+}
+
+test "grid_ref_hyperlink_id empty explicit id is implicit" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        80,
+        24,
+    ));
+    defer terminal_c.free(terminal);
+
+    // An empty "id=" is dropped by the OSC parser, so the link is implicit
+    const seq = "\x1b]8;id=;https://example.com\x1b\\link\x1b]8;;\x1b\\";
+    terminal_c.vt_write(terminal, seq, seq.len);
+
+    var ref: CGridRef = undefined;
+    try testing.expectEqual(Result.success, terminal_c.grid_ref(
+        terminal,
+        point.Point.cval(.{ .active = .{ .x = 0, .y = 0 } }),
+        &ref,
+    ));
+
+    var len: usize = 12345;
+    try testing.expectEqual(Result.no_value, grid_ref_hyperlink_id(&ref, null, 0, &len));
+    try testing.expectEqual(@as(usize, 0), len);
+}
+
+test "grid_ref_hyperlink_id shared across separate runs" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        80,
+        24,
+    ));
+    defer terminal_c.free(terminal);
+
+    // Two runs of cells on separate rows that reopen the same link
+    const seq =
+        "\x1b]8;id=one;https://example.com\x1b\\aa\x1b]8;;\x1b\\\r\n" ++
+        "\x1b]8;id=one;https://example.com\x1b\\bb\x1b]8;;\x1b\\";
+    terminal_c.vt_write(terminal, seq, seq.len);
+
+    for ([_]u16{ 0, 1 }) |y| {
+        var ref: CGridRef = undefined;
+        try testing.expectEqual(Result.success, terminal_c.grid_ref(
+            terminal,
+            point.Point.cval(.{ .active = .{ .x = 0, .y = y } }),
+            &ref,
+        ));
+
+        var buf: [256]u8 = undefined;
+        var len: usize = undefined;
+        try testing.expectEqual(Result.success, grid_ref_hyperlink_id(&ref, &buf, buf.len, &len));
+        try testing.expectEqualStrings("one", buf[0..len]);
+    }
 }
